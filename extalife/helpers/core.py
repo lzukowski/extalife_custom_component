@@ -3,10 +3,12 @@ import logging
 import importlib
 import datetime
 from typing import Callable, Any
+from concurrent.futures import ThreadPoolExecutor
 from homeassistant.helpers.event import async_track_time_interval
 import homeassistant.helpers.entity_registry as er
 from homeassistant.helpers.entity import Entity
-from homeassistant.helpers.typing import HomeAssistantType, ConfigType
+from homeassistant.helpers.typing import ConfigType
+from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 
@@ -40,13 +42,13 @@ async def options_change_callback(hass, config_entry: ConfigEntry):
 class Core:
 
     _inst = dict()
-    _hass: HomeAssistantType = None
+    _hass: HomeAssistant = None
     _services: ExtaLifeServices = None
 
     _is_stopping = False
 
     @classmethod
-    def create(cls, hass: HomeAssistantType, config_entry: ConfigEntry):
+    def create(cls, hass: HomeAssistant, config_entry: ConfigEntry):
         """Create Core instance for a given Config Entry"""
         cls._hass = hass
         inst = Core(config_entry)
@@ -60,13 +62,13 @@ class Core:
         return inst
 
     @classmethod
-    def get(cls, entry_id: ConfigEntry.entry_id) -> "Core":  # forward
+    def get(cls, entry_id: ConfigEntry) -> "Core":  # forward
         """Get instance of the Core object based on Config Entry ID"""
         return cls._inst.get(entry_id)
 
     @classmethod
-    def get_hass(cls) -> HomeAssistantType:
-        """Return HomeAssistantType instance"""
+    def get_hass(cls) -> HomeAssistant:
+        """Return HomeAssistant instance"""
         return cls._hass
 
     def __init__(self, config_entry: ConfigEntry):
@@ -140,7 +142,7 @@ class Core:
             await Core._callbacks_cleanup(inst.config_entry.entry_id)
             await inst.data_manager.async_stop_polling()
 
-            inst.api.disconnect()
+            await inst.api.disconnect()
 
     @classmethod
     async def _callbacks_cleanup(cls, entry_id=None):
@@ -156,10 +158,16 @@ class Core:
             inst.unregister_track_time_callbacks()
 
             if inst._periodic_reconnect_remove_callback:
-                inst._periodic_reconnect_remove_callback()
+                try:
+                    inst._periodic_reconnect_remove_callback()
+                except ValueError:
+                    pass
 
             if inst._options_change_remove_callback:
-                inst._options_change_remove_callback()
+                try:
+                    inst._options_change_remove_callback()
+                except ValueError:
+                    pass
 
             inst._queue_task.cancel()
             try:
@@ -251,7 +259,7 @@ class Core:
         return self._config_entry
 
     @property
-    def hass(self) -> HomeAssistantType():
+    def hass(self) -> HomeAssistant:
         return Core._hass
 
     @property
@@ -311,18 +319,40 @@ class Core:
         """Setup other, custom (pseudo)platforms"""
 
         package = ".".join(__package__.split(".")[:-1])  # 1 level above current package
-        module = importlib.import_module("." + module, package=package)
-        func = getattr(module, "async_setup_entry")
-        _LOGGER.debug("async_setup_custom_platforms(), func: %s", func)
-        await func(self.hass, self.config_entry)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            _LOGGER.debug("async_setup_custom_platforms(), request module: %s (package: %s) [%s]", "." + module, package, __package__)
+            try:
+                future = executor.submit(importlib.import_module, "." + module, package=package)
+                module = future.result()
+                _LOGGER.debug("async_setup_custom_platforms(), module: %s", module)
+                func = getattr(module, "async_setup_entry")
+                _LOGGER.debug("async_setup_custom_platforms(), func: %s", func)
+                await func(self.hass, self.config_entry)
+            except Exception as ex:
+                _LOGGER.warning("async_setup_custom_platforms(), failed with msg '%s'", repr(ex) )
 
     async def async_unload_custom_platforms(self):
         """Unload other, custom (pseudo)platforms"""
+
         package = ".".join(__package__.split(".")[:-1])  # 1 level above current package
         for platform, channels in self._platforms_cust.items():
-            module = importlib.import_module("." + platform, package=package)
-            func = getattr(module, "async_unload_entry")
-            await func(self._hass, self.config_entry)
+
+            if platform.startswith("virtual"):
+                # virtual platforms does not have import module so cannot be unloaded
+                continue
+
+            try:
+                _LOGGER.debug("async_unload_custom_platforms(), request module: %s (package: %s) [%s]", "." + platform,
+                              package, __package__)
+                module = importlib.import_module("." + platform, package=package)
+                _LOGGER.debug("async_unload_custom_platforms(), module: %s", module)
+                func = getattr(module, "async_unload_entry")
+                _LOGGER.debug("async_unload_custom_platforms(), func: %s", func)
+                await func(self._hass, self.config_entry)
+            except ModuleNotFoundError as ex:
+                _LOGGER.debug( "async_unload_custom_platforms(), failed with msg '%s'", repr(ex) )
+                pass
 
     def storage_add(self, id, inst):
         self._storage.update({id: inst})
@@ -402,6 +432,7 @@ class Core:
 
         for target in target_list:
             _LOGGER.debug("async_signal_send(), target: %s", target)
+            # self._hass.async_create_task(target, *args)
             self._hass.async_add_job(target, *args)
 
     def async_signal_send_sync(self, signal: str, args) -> None:

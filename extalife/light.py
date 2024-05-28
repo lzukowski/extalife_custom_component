@@ -14,7 +14,7 @@ from homeassistant.components.light import (
     ATTR_EFFECT,
     DOMAIN as DOMAIN_LIGHT,
 )
-from homeassistant.helpers.typing import HomeAssistantType
+from homeassistant.core import HomeAssistant
 
 from . import ExtaLifeChannel
 from .helpers.const import DOMAIN_VIRTUAL_LIGHT_SENSOR
@@ -142,7 +142,7 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
 
 
 async def async_setup_entry(
-    hass: HomeAssistantType, config_entry: ConfigEntry, async_add_entities
+    hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities
 ):
     """Set up an Exta Life light based on existing config."""
 
@@ -161,7 +161,7 @@ class ExtaLifeLight(ExtaLifeChannel, LightEntity):
     def __init__(self, channel_data, config_entry):
         super().__init__(channel_data, config_entry)
 
-        self._supported_features: int = 0
+        self._supported_features: LightEntityFeature = LightEntityFeature(0)
         self._effect_list = None
         self.channel_data = channel_data.get("data")
         self._assumed_on = False
@@ -324,7 +324,7 @@ class ExtaLifeLight(ExtaLifeChannel, LightEntity):
             return scaleto255(data.get("value"))
 
     @property
-    def supported_features(self):
+    def supported_features(self) -> LightEntityFeature:
         _LOGGER.debug("Supported flags: %s", self._supported_features)
         return self._supported_features
 
